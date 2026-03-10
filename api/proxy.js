@@ -65,7 +65,9 @@ export default async function handler(req, res) {
       }
     }
 
-    // For browser requests, keep accept-encoding
+    // Force uncompressed response to avoid DECODING_FAILED error
+    headers['Accept-Encoding'] = 'identity';
+    
     // Remove referer to avoid blocking
     delete headers['referer'];
 
