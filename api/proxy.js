@@ -19,17 +19,22 @@ export default async function handler(req, res) {
   const url = new URL(req.url, 'https://' + req.headers['host']);
   const path = url.pathname;
   
+  console.log('[Proxy] Received path:', path);
+
   if (path && path !== '/') {
-    // Remove leading slash and decode
+    // Remove leading slash
     let cleanPath = path.substring(1);
+    
+    // Decode if encoded
     try {
       cleanPath = decodeURIComponent(cleanPath);
     } catch (e) {}
     
-    // Add protocol if missing
-    if (!cleanPath.startsWith('http')) {
-      cleanPath = 'https://' + cleanPath;
-    }
+    // Fix: ensure protocol has double slashes
+    // Handle cases like: https:/example.com → https://example.com
+    cleanPath = cleanPath.replace(/^http:\/+/, 'https://');
+    cleanPath = cleanPath.replace(/^https:\/+/, 'https://');
+    
     targetUrl = cleanPath;
   }
 
@@ -39,7 +44,7 @@ export default async function handler(req, res) {
       usage: {
         header: 'x-target-url: https://api.openai.com/v1',
         url: '/https://api.openai.com/v1/chat/completions',
-        browse: '/https://google.com'
+        browse: 'https://vercel-proxy-tan-rho.vercel.app/https://google.com'
       }
     });
   }
@@ -48,6 +53,8 @@ export default async function handler(req, res) {
   if (!targetUrl.startsWith('http')) {
     targetUrl = 'https://' + targetUrl;
   }
+
+  console.log('[Proxy] Target URL:', targetUrl);
 
   try {
     // Build headers
@@ -65,13 +72,11 @@ export default async function handler(req, res) {
       }
     }
 
-    // Force uncompressed response to avoid DECODING_FAILED error
+    // Force uncompressed response
     headers['Accept-Encoding'] = 'identity';
     
     // Remove referer to avoid blocking
     delete headers['referer'];
-
-    console.log(`[Proxy] ${req.method} ${targetUrl}`);
 
     // Make the request
     const response = await fetch(targetUrl, {
@@ -89,20 +94,19 @@ export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', contentType);
     
-    // Handle redirect
+    // Handle redirect - convert back to proxy format
     if (response.redirected) {
       const newUrl = new URL(response.url);
-      // Decode the path format for redirect
       const proxyUrl = '/https://' + newUrl.hostname + newUrl.pathname;
       res.setHeader('Location', proxyUrl);
     }
     
     res.status(response.status);
 
-    // Copy other headers
+    // Copy other headers (except hop-by-hop)
     response.headers.forEach((value, key) => {
       if (!hopByHopHeaders.includes(key.toLowerCase()) && 
-          !['content-type', 'location', 'access-control-allow-origin'].includes(key.toLowerCase())) {
+          !['content-type', 'location', 'access-control-allow-origin', 'content-encoding'].includes(key.toLowerCase())) {
         try {
           res.setHeader(key, value);
         } catch (e) {}
@@ -112,7 +116,7 @@ export default async function handler(req, res) {
     res.send(Buffer.from(buffer));
 
   } catch (error) {
-    console.error(`[Proxy] Error: ${error.message}`);
+    console.error('[Proxy] Error:', error.message);
     res.status(502).json({ 
       error: 'Proxy Error', 
       message: error.message,
