@@ -1,8 +1,9 @@
-// Vercel HTTP Proxy - Enhanced Version
+// Vercel HTTP Proxy - Enhanced Version with HTML Rewriting
 // Supports: 
 // 1. x-target-url header (for API calls)
 // 2. ?url= query parameter
 // 3. URL path format: /https://target.com (for browsing)
+// 4. HTML Rewriting for relative links
 
 export default async function handler(req, res) {
   // Handle CORS preflight
@@ -58,6 +59,9 @@ export default async function handler(req, res) {
   }
 
   try {
+    const targetObj = new URL(targetUrl);
+    const proxyBase = 'https://' + req.headers['host'];
+
     // Build headers
     const headers = {};
     const hopByHopHeaders = [
@@ -92,6 +96,68 @@ export default async function handler(req, res) {
     // Get response
     const buffer = await response.arrayBuffer();
     const contentType = response.headers.get('content-type') || 'text/html';
+    let body = Buffer.from(buffer);
+
+    // HTML Rewriting - Convert relative links to proxy format
+    const contentTypeLower = contentType.toLowerCase();
+    if (contentTypeLower.includes('text/html')) {
+      let html = body.toString('utf-8');
+      
+      // Extract base URL for resolving relative paths
+      const baseUrl = targetObj.origin;
+      
+      // Rewrite relative URLs in href/src attributes
+      // Match: href="/path", src="/path", action="/path", data-url="/path"
+      const attributePatterns = [
+        { pattern: /href=["']([^"']+)["']/g, attribute: 'href' },
+        { pattern: /src=["']([^"']+)["']/g, attribute: 'src' },
+        { pattern: /action=["']([^"']+)["']/g, attribute: 'action' },
+        { pattern: /data-url=["']([^"']+)["']/g, attribute: 'data-url' },
+        { pattern: /data-src=["']([^"']+)["']/g, attribute: 'data-src' },
+        { pattern: /data-href=["']([^"']+)["']/g, attribute: 'data-href' },
+      ];
+
+      for (const { pattern, attribute } of attributePatterns) {
+        html = html.replace(pattern, (match, url) => {
+          // Skip if already absolute URL pointing to different domain
+          if (url.startsWith('http') && !url.startsWith(targetObj.origin)) {
+            // Rewrite external absolute URLs too
+            const encodedUrl = encodeURIComponent(url);
+            return `${attribute}="${proxyBase}/?url=${encodedUrl}"`;
+          }
+          // Skip javascript: URLs
+          if (url.startsWith('javascript:') || url.startsWith('data:')) {
+            return match;
+          }
+          // Convert relative URL to proxy format
+          const fullUrl = url.startsWith('/') ? baseUrl + url : baseUrl + '/' + url;
+          const encodedUrl = encodeURIComponent(fullUrl);
+          return `${attribute}="${proxyBase}/?url=${encodedUrl}"`;
+        });
+      }
+
+      // Also rewrite location.href and window.location in inline scripts (basic)
+      // This is limited but helps with some SPA routing
+      html = html.replace(/(location\.href\s*=\s*["'])([^"']+)(["'])/g, (match, prefix, url, suffix) => {
+        if (url.startsWith('http') && !url.startsWith(targetObj.origin)) {
+          const encodedUrl = encodeURIComponent(url);
+          return `${prefix}${proxyBase}/?url=${encodedUrl}${suffix}`;
+        }
+        if (!url.startsWith('http') && !url.startsWith('/') && !url.startsWith('#')) {
+          const fullUrl = baseUrl + '/' + url;
+          const encodedUrl = encodeURIComponent(fullUrl);
+          return `${prefix}${proxyBase}/?url=${encodedUrl}${suffix}`;
+        }
+        if (url.startsWith('/')) {
+          const fullUrl = baseUrl + url;
+          const encodedUrl = encodeURIComponent(fullUrl);
+          return `${prefix}${proxyBase}/?url=${encodedUrl}${suffix}`;
+        }
+        return match;
+      });
+
+      body = Buffer.from(html, 'utf-8');
+    }
 
     // Set CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -100,7 +166,7 @@ export default async function handler(req, res) {
     // Handle redirect - convert back to proxy format
     if (response.redirected) {
       const newUrl = new URL(response.url);
-      const proxyUrl = '/https://' + newUrl.hostname + newUrl.pathname + newUrl.search;
+      const proxyUrl = '/?url=' + encodeURIComponent(newUrl.origin + newUrl.pathname + newUrl.search);
       res.setHeader('Location', proxyUrl);
     }
     
@@ -116,7 +182,7 @@ export default async function handler(req, res) {
       }
     });
 
-    res.send(Buffer.from(buffer));
+    res.send(body);
 
   } catch (error) {
     console.error('[Proxy] Error:', error.message);
