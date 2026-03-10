@@ -1,7 +1,8 @@
 // Vercel HTTP Proxy - Enhanced Version
 // Supports: 
 // 1. x-target-url header (for API calls)
-// 2. URL path format: /https://target.com (for browsing)
+// 2. ?url= query parameter
+// 3. URL path format: /https://target.com (for browsing)
 
 export default async function handler(req, res) {
   // Handle CORS preflight
@@ -12,30 +13,32 @@ export default async function handler(req, res) {
     return res.status(204).end();
   }
 
-  // Get target URL - check multiple sources
+  // Get target URL from multiple sources
   let targetUrl = req.headers['x-target-url'];
   
-  // Extract from URL path: /https://example.com → https://example.com
-  const url = new URL(req.url, 'https://' + req.headers['host']);
-  const path = url.pathname;
+  // Check query parameter: ?url=https://...
+  const urlQuery = req.query.url;
+  if (urlQuery) {
+    targetUrl = Array.isArray(urlQuery) ? urlQuery[0] : urlQuery;
+  }
   
-  console.log('[Proxy] Received path:', path);
-
-  if (path && path !== '/') {
-    // Remove leading slash
-    let cleanPath = path.substring(1);
+  // Extract from URL path: /https://example.com → https://example.com
+  if (!targetUrl) {
+    const url = new URL(req.url, 'https://' + req.headers['host']);
+    const path = url.pathname;
     
-    // Decode if encoded
-    try {
-      cleanPath = decodeURIComponent(cleanPath);
-    } catch (e) {}
-    
-    // Fix: ensure protocol has double slashes
-    // Handle cases like: https:/example.com → https://example.com
-    cleanPath = cleanPath.replace(/^http:\/+/, 'https://');
-    cleanPath = cleanPath.replace(/^https:\/+/, 'https://');
-    
-    targetUrl = cleanPath;
+    if (path && path !== '/') {
+      let cleanPath = path.substring(1);
+      try {
+        cleanPath = decodeURIComponent(cleanPath);
+      } catch (e) {}
+      
+      // Fix: ensure protocol has double slashes
+      cleanPath = cleanPath.replace(/^http:\/+/, 'https://');
+      cleanPath = cleanPath.replace(/^https:\/+/, 'https://');
+      
+      targetUrl = cleanPath;
+    }
   }
 
   if (!targetUrl) {
@@ -43,8 +46,8 @@ export default async function handler(req, res) {
       error: 'Missing target URL',
       usage: {
         header: 'x-target-url: https://api.openai.com/v1',
-        url: '/https://api.openai.com/v1/chat/completions',
-        browse: 'https://vercel-proxy-tan-rho.vercel.app/https://google.com'
+        query: '?url=https://api.openai.com/v1',
+        path: '/https://api.openai.com/v1/chat/completions'
       }
     });
   }
@@ -53,8 +56,6 @@ export default async function handler(req, res) {
   if (!targetUrl.startsWith('http')) {
     targetUrl = 'https://' + targetUrl;
   }
-
-  console.log('[Proxy] Target URL:', targetUrl);
 
   try {
     // Build headers
@@ -78,6 +79,8 @@ export default async function handler(req, res) {
     // Remove referer to avoid blocking
     delete headers['referer'];
 
+    console.log('[Proxy] Target:', targetUrl);
+
     // Make the request
     const response = await fetch(targetUrl, {
       method: req.method,
@@ -97,7 +100,7 @@ export default async function handler(req, res) {
     // Handle redirect - convert back to proxy format
     if (response.redirected) {
       const newUrl = new URL(response.url);
-      const proxyUrl = '/https://' + newUrl.hostname + newUrl.pathname;
+      const proxyUrl = '/https://' + newUrl.hostname + newUrl.pathname + newUrl.search;
       res.setHeader('Location', proxyUrl);
     }
     
